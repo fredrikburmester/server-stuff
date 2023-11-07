@@ -32,4 +32,35 @@
     "files.autoSaveDelay": 30000,
     "search.showLineNumbers": true,
     "window.zoomLevel": -1,
+    "terminal.integrated.env.osx": {},
+
+    // Show hidden files
+    "files.exclude": {
+        "**/.git": false,
+        "**/.svn": false,
+        "**/.hg": false,
+        "**/.DS_Store": false,
+        "**/.ruby-lsp": false,
+        
+    },
+    
+    // Ruby ERB Formatting
+    "emeraldwalk.runonsave": {
+          "commands": [
+              {
+                "match": "\\.html.erb$",
+                "cmd": "LC_ALL='en_US.UTF-8' htmlbeautifier \"${file}\""
+              }
+            ]
+      },
+    "rubyLsp.formatter": "rubocop",
+    "rubyLsp.rubyVersionManager": "rvm",
+    "[ruby]": {
+      "editor.defaultFormatter": "Shopify.ruby-lsp", // Use the Ruby LSP as the default formatter
+      "editor.formatOnSave": true, // Format files automatically when saving
+      "editor.tabSize": 2, // Use 2 spaces for indentation
+      "editor.insertSpaces": true, // Use spaces and not tabs for indentantion
+      "editor.semanticHighlighting.enabled": true, // Enable semantic highlighting
+      "editor.formatOnType": true, // Enable formatting while typing
+    }
   }
