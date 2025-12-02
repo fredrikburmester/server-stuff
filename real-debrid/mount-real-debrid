@@ -1,0 +1,27 @@
+#!/bin/bash
+# Start RClone Mount for Real-Debrid
+
+# Kill any existing rclone processes for this mount
+pkill -f "mount decy:"
+
+# Wait a moment for cleanup
+sleep 2
+
+# Start the mount in a new session
+setsid /usr/sbin/rclone --config /boot/config/plugins/rclone/.rclone.conf \
+  mount decy: /mnt/user/RDDATA/remotes/realdebrid \
+  --vfs-cache-mode full --dir-cache-time 24h --vfs-cache-max-size 10G --vfs-cache-max-age 24h \
+  --buffer-size 64M --attr-timeout 1s --umask 002 --allow-other \
+  --rc --rc-addr 127.0.0.1:5610 --rc-user admin --rc-pass admin \
+  --log-file /var/log/rclone-decy.log --log-level INFO </dev/null >/dev/null 2>&1 &
+
+# Wait and check if mount is working
+sleep 5
+if pgrep -f "mount decy:" > /dev/null; then
+    echo "✅ RClone mount started successfully"
+    echo "🌐 Remote control: http://127.0.0.1:5610/"
+    echo "📊 Log file: /var/log/rclone-decy.log"
+else
+    echo "❌ Failed to start RClone mount"
+    echo "Check log: tail /var/log/rclone-decy.log"
+fi

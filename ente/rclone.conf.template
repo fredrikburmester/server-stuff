@@ -1,0 +1,16 @@
+# Ente Backups - Backblaze B2 Configuration
+# Copy this to rclone.conf and fill in your credentials
+#
+# Get credentials from: https://secure.backblaze.com/app_keys.htm
+# Create an application key with read/write access to your buckets
+
+[ente-backups]
+type = b2
+account = YOUR_B2_KEY_ID
+key = YOUR_B2_APPLICATION_KEY
+
+# Optional: If you have a specific endpoint or want to use other B2 settings
+# endpoint = 
+# hard_delete = true
+
+

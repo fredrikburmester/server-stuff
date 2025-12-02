@@ -1,0 +1,10 @@
+# Credentials - NEVER commit these
+*.conf
+!*.conf.template
+.env
+!.env.example
+
+# Secrets
+**/secrets/
+**/credentials/
+

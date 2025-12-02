@@ -1,0 +1,147 @@
+#!/bin/bash
+
+# Ente Backup Script
+# Backs up: config tar (to B2) + MinIO data (incremental sync to B2)
+
+set -e
+
+TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
+BACKUP_DIR="/mnt/user/Backups/EntePhotos"
+STAGING_DIR="/mnt/user/temp_backup"
+ARCHIVE_NAME="ente-backup-$TIMESTAMP.tar.gz"
+FULL_ARCHIVE_PATH="$BACKUP_DIR/$ARCHIVE_NAME"
+
+# B2 remotes
+B2_TAR_BUCKET="ente-backups:ente-photos-tar-backup"
+B2_MINIO_BUCKET="ente-backups:ente-minio"
+MINIO_SOURCE="/mnt/user/EntePhotos/minio-data/"
+
+# Logs 
+LOG_DIR="/mnt/user/Backups/EntePhotos/logs"
+LOG_FILE="$LOG_DIR/backup-$TIMESTAMP.log"
+
+# Ensure directories exist
+mkdir -p "$BACKUP_DIR" "$STAGING_DIR/appdata" "$LOG_DIR"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "========================================"
+echo "  Ente Backup"
+echo "  $(date)"
+echo "========================================"
+echo ""
+echo "[INFO] Logging to: $LOG_FILE"
+echo ""
+
+# 1. Dump PostgreSQL database
+echo "1. Dumping PostgreSQL database..."
+echo "----------------------------------------"
+
+POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-ente-postgres}"
+
+if docker exec "$POSTGRES_CONTAINER" pg_isready -U pguser 2>/dev/null || \
+   docker exec ente-photos-postgres-1 pg_isready -U pguser 2>/dev/null; then
+    # Try new name first, fall back to auto-generated name
+    if docker exec "$POSTGRES_CONTAINER" pg_isready -U pguser 2>/dev/null; then
+        PG_CONTAINER="$POSTGRES_CONTAINER"
+    else
+        PG_CONTAINER="ente-photos-postgres-1"
+    fi
+    docker exec "$PG_CONTAINER" pg_dump -U pguser -d ente_db -F p \
+      > "$STAGING_DIR/appdata/postgres-backup.sql" || {
+        echo "[FAIL] Database dump failed!"; exit 1;
+      }
+    echo "[OK] Database dump successful ($(du -h "$STAGING_DIR/appdata/postgres-backup.sql" | cut -f1))"
+else
+    echo "[FAIL] PostgreSQL is not running"
+    exit 1
+fi
+echo ""
+
+# 2. Backup AppData
+echo "2. Backing up AppData (configs + DB dump)..."
+echo "----------------------------------------"
+
+rsync -av /mnt/user/appdata/ente-photos/ "$STAGING_DIR/appdata/"
+echo "[OK] AppData copied to staging"
+echo ""
+
+# 3. Compress config backup
+echo "3. Compressing config backup..."
+echo "----------------------------------------"
+
+tar -czvf "$FULL_ARCHIVE_PATH" -C "$STAGING_DIR" appdata || { 
+    echo "[FAIL] Tar compression failed!"
+    exit 1
+}
+
+if [ ! -f "$FULL_ARCHIVE_PATH" ]; then
+    echo "[FAIL] Tar file missing!"
+    exit 1
+fi
+echo "[OK] Created: $ARCHIVE_NAME ($(du -h "$FULL_ARCHIVE_PATH" | cut -f1))"
+echo ""
+
+# 4. Upload config tar to B2
+echo "4. Uploading config tar to B2..."
+echo "----------------------------------------"
+
+rclone copy "$FULL_ARCHIVE_PATH" "$B2_TAR_BUCKET" || { 
+    echo "[FAIL] Upload failed!"
+    exit 1
+}
+
+echo "[INFO] Verifying upload integrity..."
+rclone check "$FULL_ARCHIVE_PATH" "$B2_TAR_BUCKET" || { 
+    echo "[FAIL] Upload integrity check failed!"
+    exit 1
+}
+echo "[OK] Config tar uploaded and verified"
+echo ""
+
+# 5. Incremental sync MinIO to B2
+echo "5. Syncing MinIO data to B2 (incremental)..."
+echo "----------------------------------------"
+echo "[WARN] This makes B2 match local exactly (deletions included)"
+echo "[INFO] Ensure B2 bucket versioning is enabled for recovery"
+echo ""
+
+rclone sync "$MINIO_SOURCE" "$B2_MINIO_BUCKET" \
+  --fast-list \
+  --transfers=8 \
+  --checkers=16 \
+  --b2-hard-delete \
+  --exclude ".minio.sys/**" \
+  --log-level INFO || { 
+    echo "[FAIL] MinIO sync failed!"
+    exit 1
+}
+
+echo "[INFO] Verifying MinIO sync integrity..."
+rclone check "$MINIO_SOURCE" "$B2_MINIO_BUCKET" \
+  --one-way \
+  --exclude ".minio.sys/**" || { 
+    echo "[FAIL] MinIO integrity check failed!"
+    exit 1
+}
+echo "[OK] MinIO sync complete"
+echo ""
+
+# 6. Clean up
+echo "6. Cleaning up..."
+echo "----------------------------------------"
+
+rm -rf "$STAGING_DIR"
+echo "$TIMESTAMP" > "$BACKUP_DIR/LATEST_BACKUP_TIMESTAMP.txt"
+echo "[OK] Staging directory removed"
+echo ""
+
+echo "========================================"
+echo "  Backup Complete!"
+echo "========================================"
+echo ""
+echo "Timestamp: $TIMESTAMP"
+echo "Config tar: $B2_TAR_BUCKET/$ARCHIVE_NAME"
+echo "MinIO data: $B2_MINIO_BUCKET"
+echo ""
+echo "Run ./validate-backup to verify integrity"

@@ -1,0 +1,48 @@
+#!/bin/bash
+set -euo pipefail
+
+# ===== Settings =====
+SRC="${SRC_OVERRIDE:-/mnt/user/SFTPGO}"
+REMOTE="${REMOTE_OVERRIDE:-sftpgo-crypt}"                 # crypt -> b2-sftpgo:sftpgo-rclone-backup-mercury
+DEST_PATH="${DEST_PATH_OVERRIDE:-data}"                   # live data subfolder (prevents overlap)
+DELETED_ROOT="${DELETED_ROOT_OVERRIDE:-_deleted}"         # sibling to DEST_PATH
+LOG_DIR="/mnt/user/Backups/_logs"
+LOCK="/var/lock/sftpgo_backup.lock"
+TRANSFERS=16
+CHECKERS=16
+DRY_RUN="${DRY_RUN:-0}"
+# ====================
+
+mkdir -p "$LOG_DIR"
+TS="$(date +'%Y-%m-%d_%H-%M-%S')"
+LOG_FILE="${LOG_DIR}/sftpgo-b2-${TS}.log"
+
+exec 9>"$LOCK"
+flock -n 9 || { echo "Backup already running."; exit 0; }
+[[ -d "$SRC" ]] || { echo "Missing SRC: $SRC"; exit 1; }
+
+DEST="${REMOTE}:${DEST_PATH}"
+BACKUPS="${REMOTE}:${DELETED_ROOT}/${TS}"
+
+ARGS=(
+  --fast-list
+  --b2-hard-delete
+  --backup-dir "$BACKUPS"
+  --metadata --links
+  --transfers "$TRANSFERS" --checkers "$CHECKERS"
+  --stats 30s
+  --log-file "$LOG_FILE" --log-level INFO
+  --exclude "/**/node_modules/**"
+  --exclude "/**/.cache/**"
+  --exclude "/**/.DS_Store"
+  --exclude "/**/.git/**"
+  --exclude "/**/dist/**"
+)
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  rclone sync "$SRC" "$DEST" --dry-run "${ARGS[@]}"
+else
+  rclone sync "$SRC" "$DEST"          "${ARGS[@]}"
+fi
+
+echo "Done. Log: $LOG_FILE"

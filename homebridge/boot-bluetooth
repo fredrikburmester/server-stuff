@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# Bring adapter up if it exists
+if hciconfig hci0 >/dev/null 2>&1; then
+  hciconfig hci0 up
+fi
+
+# Start bluetoothd only if not already running
+if ! pgrep -x bluetoothd >/dev/null 2>&1; then
+  bluetoothd &
+fi

@@ -1,0 +1,365 @@
+#!/bin/bash
+
+# Ente Disaster Recovery / Fresh Server Bootstrap
+# Spins up a complete Ente replica from B2 backups
+#
+# Prerequisites on target server:
+#   - Docker & Docker Compose installed
+#   - This script + credentials files
+#
+# Usage:
+#   ./disaster-recovery --rclone-conf=/path/to/rclone.conf
+#   ./disaster-recovery --interactive
+
+set -e
+
+# Default paths (Unraid style - modify for your system)
+APPDATA_DIR="/mnt/user/appdata/ente-photos"
+MINIO_DIR="/mnt/user/EntePhotos/minio-data"
+BACKUP_DIR="/mnt/user/Backups/EntePhotos"
+
+# B2 remotes (must match rclone.conf)
+B2_TAR_BUCKET="ente-backups:ente-photos-tar-backup"
+B2_MINIO_BUCKET="ente-backups:ente-minio"
+
+# Parse arguments
+INTERACTIVE=false
+RCLONE_CONF=""
+CUSTOM_APPDATA=""
+CUSTOM_MINIO=""
+DRY_RUN=false
+
+print_help() {
+    echo "Ente Disaster Recovery"
+    echo ""
+    echo "Usage: $0 [options]"
+    echo ""
+    echo "Options:"
+    echo "  --rclone-conf=PATH   Path to rclone.conf with B2 credentials"
+    echo "  --interactive        Prompt for all settings"
+    echo "  --appdata=PATH       Custom appdata directory"
+    echo "  --minio=PATH         Custom MinIO data directory"
+    echo "  --dry-run            Show what would be done without executing"
+    echo "  --help               Show this help"
+    echo ""
+    echo "Example:"
+    echo "  $0 --rclone-conf=./rclone.conf"
+    echo "  $0 --interactive"
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --rclone-conf=*) RCLONE_CONF="${1#*=}"; shift ;;
+        --interactive) INTERACTIVE=true; shift ;;
+        --appdata=*) CUSTOM_APPDATA="${1#*=}"; shift ;;
+        --minio=*) CUSTOM_MINIO="${1#*=}"; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --help) print_help; exit 0 ;;
+        *) echo "Unknown option: $1"; print_help; exit 1 ;;
+    esac
+done
+
+# Apply custom paths
+[ -n "$CUSTOM_APPDATA" ] && APPDATA_DIR="$CUSTOM_APPDATA"
+[ -n "$CUSTOM_MINIO" ] && MINIO_DIR="$CUSTOM_MINIO"
+
+echo "========================================"
+echo "  Ente Disaster Recovery"
+echo "  $(date)"
+echo "========================================"
+echo ""
+
+# Interactive mode
+if [ "$INTERACTIVE" = true ]; then
+    echo "Interactive Setup"
+    echo "----------------------------------------"
+    
+    read -p "Appdata directory [$APPDATA_DIR]: " input
+    [ -n "$input" ] && APPDATA_DIR="$input"
+    
+    read -p "MinIO data directory [$MINIO_DIR]: " input
+    [ -n "$input" ] && MINIO_DIR="$input"
+    
+    read -p "Backup directory [$BACKUP_DIR]: " input
+    [ -n "$input" ] && BACKUP_DIR="$input"
+    
+    if [ -z "$RCLONE_CONF" ]; then
+        read -p "Path to rclone.conf: " RCLONE_CONF
+    fi
+    echo ""
+fi
+
+# Validate rclone config
+if [ -z "$RCLONE_CONF" ]; then
+    # Check default locations
+    if [ -f "./rclone.conf" ]; then
+        RCLONE_CONF="./rclone.conf"
+    elif [ -f "$HOME/.config/rclone/rclone.conf" ]; then
+        RCLONE_CONF="$HOME/.config/rclone/rclone.conf"
+    else
+        echo "[FAIL] No rclone.conf found"
+        echo "       Provide with --rclone-conf=PATH or place in current directory"
+        exit 1
+    fi
+fi
+
+if [ ! -f "$RCLONE_CONF" ]; then
+    echo "[FAIL] rclone.conf not found: $RCLONE_CONF"
+    exit 1
+fi
+
+# Verify rclone config has ente-backups remote
+if ! grep -q "\[ente-backups\]" "$RCLONE_CONF"; then
+    echo "[FAIL] rclone.conf missing [ente-backups] remote"
+    echo "       Expected remote name: ente-backups"
+    exit 1
+fi
+
+echo "Configuration:"
+echo "----------------------------------------"
+echo "  Appdata:    $APPDATA_DIR"
+echo "  MinIO:      $MINIO_DIR"
+echo "  Backups:    $BACKUP_DIR"
+echo "  rclone:     $RCLONE_CONF"
+echo ""
+
+if [ "$DRY_RUN" = true ]; then
+    echo "[DRY RUN] Would proceed with above configuration"
+    exit 0
+fi
+
+# Confirm before proceeding
+read -p "Proceed with recovery? [y/N]: " confirm
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 0
+fi
+echo ""
+
+# Export rclone config location
+export RCLONE_CONFIG="$RCLONE_CONF"
+
+# 1. Check prerequisites
+echo "1. Checking prerequisites..."
+echo "----------------------------------------"
+
+if ! command -v docker &> /dev/null; then
+    echo "[FAIL] Docker not installed"
+    exit 1
+fi
+echo "[OK] Docker installed"
+
+if ! command -v rclone &> /dev/null; then
+    echo "[FAIL] rclone not installed"
+    exit 1
+fi
+echo "[OK] rclone installed"
+
+# Test B2 connection
+if ! rclone lsd ente-backups: --max-depth 1 &> /dev/null; then
+    echo "[FAIL] Cannot connect to B2 with provided credentials"
+    exit 1
+fi
+echo "[OK] B2 connection successful"
+echo ""
+
+# 2. Create directories
+echo "2. Creating directories..."
+echo "----------------------------------------"
+
+mkdir -p "$APPDATA_DIR" "$MINIO_DIR" "$BACKUP_DIR"
+echo "[OK] Directories created"
+echo ""
+
+# 3. Download latest config tar from B2
+echo "3. Downloading config backup from B2..."
+echo "----------------------------------------"
+
+REMOTE_TAR=$(rclone lsf "$B2_TAR_BUCKET" --files-only 2>/dev/null | grep "ente-backup-.*\.tar\.gz" | sort -r | head -n 1)
+
+if [ -z "$REMOTE_TAR" ]; then
+    echo "[FAIL] No backup found in B2"
+    exit 1
+fi
+
+echo "[INFO] Found: $REMOTE_TAR"
+rclone copy "$B2_TAR_BUCKET/$REMOTE_TAR" "$BACKUP_DIR/" --progress
+echo "[OK] Config backup downloaded"
+echo ""
+
+# 4. Extract config backup
+echo "4. Extracting config backup..."
+echo "----------------------------------------"
+
+tar -xzvf "$BACKUP_DIR/$REMOTE_TAR" -C "$BACKUP_DIR"
+EXTRACTED=$(tar -tzf "$BACKUP_DIR/$REMOTE_TAR" | head -1 | cut -d'/' -f1)
+
+# Determine appdata location in archive
+if [ -d "$BACKUP_DIR/$EXTRACTED/appdata" ]; then
+    EXTRACTED_APPDATA="$BACKUP_DIR/$EXTRACTED/appdata"
+elif [ -f "$BACKUP_DIR/$EXTRACTED/postgres-backup.sql" ]; then
+    EXTRACTED_APPDATA="$BACKUP_DIR/$EXTRACTED"
+else
+    echo "[FAIL] Invalid backup structure"
+    exit 1
+fi
+
+echo "[OK] Extracted to: $BACKUP_DIR/$EXTRACTED"
+echo ""
+
+# 5. Restore appdata (docker-compose, configs, env files)
+echo "5. Restoring appdata..."
+echo "----------------------------------------"
+
+rsync -av "$EXTRACTED_APPDATA/" "$APPDATA_DIR/"
+echo "[OK] Appdata restored"
+
+# Verify docker-compose exists
+COMPOSE_FILE=""
+if [ -f "$APPDATA_DIR/docker-compose.yml" ]; then
+    COMPOSE_FILE="$APPDATA_DIR/docker-compose.yml"
+elif [ -f "$APPDATA_DIR/docker-compose.yaml" ]; then
+    COMPOSE_FILE="$APPDATA_DIR/docker-compose.yaml"
+else
+    echo "[WARN] docker-compose.yml not found in backup"
+    echo "       You may need to provide this manually"
+fi
+
+# Fix hardcoded paths in docker-compose.yml
+if [ -n "$COMPOSE_FILE" ]; then
+    echo "[INFO] Fixing docker-compose paths for this system..."
+    
+    # Detect original appdata path from compose file
+    ORIG_APPDATA=$(grep -oP '/[^:]+(?=/config/museum\.yaml:|/custom-logs:|/postgres-data:)' "$COMPOSE_FILE" | head -1)
+    ORIG_MINIO=$(grep -oP '/[^:]+(?=:/data\s*$)' "$COMPOSE_FILE" | grep -v appdata | head -1)
+    
+    if [ -n "$ORIG_APPDATA" ] && [ "$ORIG_APPDATA" != "$APPDATA_DIR" ]; then
+        echo "[INFO] Replacing appdata path: $ORIG_APPDATA -> $APPDATA_DIR"
+        sed -i "s|$ORIG_APPDATA|$APPDATA_DIR|g" "$COMPOSE_FILE"
+    fi
+    
+    if [ -n "$ORIG_MINIO" ] && [ "$ORIG_MINIO" != "$MINIO_DIR" ]; then
+        echo "[INFO] Replacing minio path: $ORIG_MINIO -> $MINIO_DIR"
+        sed -i "s|$ORIG_MINIO|$MINIO_DIR|g" "$COMPOSE_FILE"
+    fi
+    
+    echo "[OK] Docker-compose paths updated"
+fi
+echo ""
+
+# 6. Download MinIO data from B2
+echo "6. Downloading MinIO data from B2..."
+echo "----------------------------------------"
+echo "[INFO] This may take a while for large photo libraries..."
+
+MINIO_SIZE=$(rclone size "$B2_MINIO_BUCKET" --json 2>/dev/null | grep -o '"bytes":[0-9]*' | cut -d: -f2)
+MINIO_SIZE_H=$(numfmt --to=iec-i --suffix=B $MINIO_SIZE 2>/dev/null || echo "$MINIO_SIZE bytes")
+echo "[INFO] Total MinIO data: $MINIO_SIZE_H"
+
+rclone sync "$B2_MINIO_BUCKET" "$MINIO_DIR/" \
+    --progress \
+    --transfers=8 \
+    --checkers=16
+
+echo "[OK] MinIO data downloaded"
+echo ""
+
+# 7. Start Docker stack
+echo "7. Starting Ente Docker stack..."
+echo "----------------------------------------"
+
+cd "$APPDATA_DIR"
+
+if [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
+    docker compose up -d
+    echo "[OK] Containers starting"
+else
+    echo "[SKIP] No docker-compose file found"
+    echo "       Start containers manually after adding docker-compose.yml"
+fi
+echo ""
+
+# 8. Wait for PostgreSQL and restore database
+echo "8. Restoring PostgreSQL database..."
+echo "----------------------------------------"
+
+if [ -f "$APPDATA_DIR/postgres-backup.sql" ]; then
+    # Detect postgres container name
+    PG_CONTAINER=""
+    TRIES=0
+    echo "[INFO] Waiting for PostgreSQL..."
+    while [ -z "$PG_CONTAINER" ] || ! docker exec "$PG_CONTAINER" pg_isready -U pguser 2>/dev/null; do
+        # Try to find the container
+        for name in ente-postgres ente-photos-postgres-1; do
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
+                PG_CONTAINER="$name"
+                break
+            fi
+        done
+        
+        TRIES=$((TRIES+1))
+        if [ $TRIES -gt 30 ]; then
+            echo "[FAIL] PostgreSQL did not start"
+            echo "       Restore database manually after containers are running"
+            exit 1
+        fi
+        sleep 2
+    done
+    echo "[OK] PostgreSQL ready (container: $PG_CONTAINER)"
+
+    echo "[INFO] Dropping existing database..."
+    docker exec -i "$PG_CONTAINER" psql -U pguser -d postgres <<EOF
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='ente_db';
+DROP DATABASE IF EXISTS ente_db;
+CREATE DATABASE ente_db;
+EOF
+
+    echo "[INFO] Restoring database..."
+    docker exec -i "$PG_CONTAINER" psql -U pguser -d ente_db < "$APPDATA_DIR/postgres-backup.sql"
+    echo "[OK] Database restored"
+else
+    echo "[WARN] postgres-backup.sql not found"
+fi
+echo ""
+
+# 9. Clean up
+echo "9. Cleaning up..."
+echo "----------------------------------------"
+
+rm -rf "$BACKUP_DIR/$EXTRACTED"
+echo "[OK] Temporary files removed"
+echo ""
+
+# 10. Copy rclone config for future backups
+echo "10. Setting up rclone for future backups..."
+echo "----------------------------------------"
+
+RCLONE_DEST="$HOME/.config/rclone"
+mkdir -p "$RCLONE_DEST"
+
+if [ ! -f "$RCLONE_DEST/rclone.conf" ]; then
+    cp "$RCLONE_CONF" "$RCLONE_DEST/rclone.conf"
+    echo "[OK] rclone.conf installed to $RCLONE_DEST"
+else
+    echo "[SKIP] rclone.conf already exists at $RCLONE_DEST"
+fi
+echo ""
+
+echo "========================================"
+echo "  Recovery Complete!"
+echo "========================================"
+echo ""
+echo "Ente should now be running. Verify with:"
+echo "  docker ps | grep ente"
+echo ""
+echo "Check logs:"
+echo "  cd $APPDATA_DIR && docker compose logs -f"
+echo ""
+echo "Test connection from Ente client app."
+echo ""
+echo "To run future backups:"
+echo "  ./backup-ente"
+echo ""
+echo "To validate backups:"
+echo "  ./validate-backup"
+

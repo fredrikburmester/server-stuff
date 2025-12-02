@@ -1,0 +1,246 @@
+#!/bin/bash
+
+# Ente Backup Validation Script
+# Validates both local and remote (B2) backup integrity
+
+set -e
+
+BACKUP_DIR="/mnt/user/Backups/EntePhotos"
+MINIO_SOURCE="/mnt/user/EntePhotos/minio-data/"
+B2_TAR_BUCKET="ente-backups:ente-photos-tar-backup"
+B2_MINIO_BUCKET="ente-backups:ente-minio"
+TEMP_DIR="/tmp/ente-backup-validation"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+ERRORS=0
+WARNINGS=0
+
+log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; WARNINGS=$((WARNINGS+1)); }
+log_fail() { echo -e "${RED}[FAIL]${NC} $1"; ERRORS=$((ERRORS+1)); }
+log_info() { echo -e "[INFO] $1"; }
+
+cleanup() {
+    rm -rf "$TEMP_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+echo "========================================"
+echo "  Ente Backup Validation"
+echo "  $(date)"
+echo "========================================"
+echo ""
+
+mkdir -p "$TEMP_DIR"
+
+# 1. Find latest local backup
+echo "1. Checking local backup archive..."
+echo "----------------------------------------"
+
+LATEST_LOCAL=$(ls -t "$BACKUP_DIR" 2>/dev/null | grep "ente-backup-.*\.tar\.gz" | head -n 1)
+
+if [ -z "$LATEST_LOCAL" ]; then
+    log_fail "No local backup archive found in $BACKUP_DIR"
+else
+    log_ok "Latest local backup: $LATEST_LOCAL"
+    LOCAL_SIZE=$(du -h "$BACKUP_DIR/$LATEST_LOCAL" | cut -f1)
+    log_info "Size: $LOCAL_SIZE"
+    
+    # Verify tar integrity
+    log_info "Testing tar archive integrity..."
+    if tar -tzf "$BACKUP_DIR/$LATEST_LOCAL" > /dev/null 2>&1; then
+        log_ok "Tar archive is valid"
+    else
+        log_fail "Tar archive is corrupted!"
+    fi
+fi
+echo ""
+
+# 2. Check B2 remote backup
+echo "2. Checking B2 remote backup (config tar)..."
+echo "----------------------------------------"
+
+LATEST_REMOTE=$(rclone lsf "$B2_TAR_BUCKET" --files-only 2>/dev/null | grep "ente-backup-.*\.tar\.gz" | sort -r | head -n 1)
+
+if [ -z "$LATEST_REMOTE" ]; then
+    log_fail "No backup found in B2 bucket $B2_TAR_BUCKET"
+else
+    log_ok "Latest B2 backup: $LATEST_REMOTE"
+    REMOTE_SIZE=$(rclone size "$B2_TAR_BUCKET/$LATEST_REMOTE" --json 2>/dev/null | grep -o '"bytes":[0-9]*' | cut -d: -f2)
+    REMOTE_SIZE_H=$(numfmt --to=iec-i --suffix=B $REMOTE_SIZE 2>/dev/null || echo "$REMOTE_SIZE bytes")
+    log_info "Size: $REMOTE_SIZE_H"
+    
+    # Compare local vs remote
+    if [ "$LATEST_LOCAL" = "$LATEST_REMOTE" ]; then
+        log_ok "Local and remote backups match"
+    else
+        log_warn "Local ($LATEST_LOCAL) and remote ($LATEST_REMOTE) differ"
+    fi
+fi
+echo ""
+
+# 3. Validate SQL dump inside tar
+echo "3. Validating PostgreSQL dump..."
+echo "----------------------------------------"
+
+if [ -n "$LATEST_LOCAL" ]; then
+    log_info "Extracting SQL dump for validation..."
+    tar -xzf "$BACKUP_DIR/$LATEST_LOCAL" -C "$TEMP_DIR" --wildcards "*/postgres-backup.sql" 2>/dev/null || true
+    
+    SQL_FILE=$(find "$TEMP_DIR" -name "postgres-backup.sql" 2>/dev/null | head -1)
+    
+    if [ -z "$SQL_FILE" ] || [ ! -f "$SQL_FILE" ]; then
+        log_fail "postgres-backup.sql not found in archive"
+    else
+        SQL_SIZE=$(du -h "$SQL_FILE" | cut -f1)
+        log_ok "SQL dump found: $SQL_SIZE"
+        
+        # Basic SQL validation
+        if head -1 "$SQL_FILE" | grep -q "PostgreSQL database dump\|pg_dump"; then
+            log_ok "SQL dump header is valid"
+        else
+            log_warn "SQL dump header looks unusual"
+        fi
+        
+        # Check for key tables
+        if grep -q "CREATE TABLE" "$SQL_FILE"; then
+            TABLE_COUNT=$(grep -c "CREATE TABLE" "$SQL_FILE" || echo 0)
+            log_ok "SQL contains $TABLE_COUNT table definitions"
+        else
+            log_fail "No CREATE TABLE statements found - dump may be empty"
+        fi
+        
+        # Check dump completed (look for end marker)
+        if tail -20 "$SQL_FILE" | grep -q "PostgreSQL database dump complete\|dump completed"; then
+            log_ok "SQL dump completed successfully"
+        else
+            log_warn "SQL dump may be truncated (no completion marker)"
+        fi
+    fi
+fi
+echo ""
+
+# 4. Validate MinIO sync
+echo "4. Validating MinIO object storage sync..."
+echo "----------------------------------------"
+
+if [ -d "$MINIO_SOURCE" ]; then
+    LOCAL_MINIO_COUNT=$(find "$MINIO_SOURCE" -type f ! -path "*/.minio.sys/*" 2>/dev/null | wc -l)
+    LOCAL_MINIO_SIZE=$(du -sh "$MINIO_SOURCE" 2>/dev/null | cut -f1)
+    log_info "Local MinIO: $LOCAL_MINIO_COUNT files, $LOCAL_MINIO_SIZE total"
+    
+    log_info "Checking B2 MinIO bucket..."
+    REMOTE_MINIO_INFO=$(rclone size "$B2_MINIO_BUCKET" --json 2>/dev/null)
+    
+    if [ -n "$REMOTE_MINIO_INFO" ]; then
+        REMOTE_COUNT=$(echo "$REMOTE_MINIO_INFO" | grep -o '"count":[0-9]*' | cut -d: -f2)
+        REMOTE_BYTES=$(echo "$REMOTE_MINIO_INFO" | grep -o '"bytes":[0-9]*' | cut -d: -f2)
+        REMOTE_SIZE_H=$(numfmt --to=iec-i --suffix=B $REMOTE_BYTES 2>/dev/null || echo "$REMOTE_BYTES bytes")
+        log_info "B2 MinIO: $REMOTE_COUNT files, $REMOTE_SIZE_H total"
+        
+        # Compare counts (allow small difference for .minio.sys exclusion)
+        DIFF=$((LOCAL_MINIO_COUNT - REMOTE_COUNT))
+        if [ ${DIFF#-} -le 5 ]; then
+            log_ok "File counts match (within tolerance)"
+        else
+            log_warn "File count mismatch: local=$LOCAL_MINIO_COUNT, remote=$REMOTE_COUNT"
+        fi
+    else
+        log_fail "Could not access B2 MinIO bucket"
+    fi
+    
+    # Integrity check (sample - full check is slow)
+    log_info "Running integrity check (this may take a while)..."
+    MISMATCH=$(rclone check "$MINIO_SOURCE" "$B2_MINIO_BUCKET" \
+        --one-way \
+        --exclude ".minio.sys/**" \
+        --checkers=4 \
+        2>&1 | grep -c "ERROR" || echo 0)
+    
+    if [ "$MISMATCH" -eq 0 ]; then
+        log_ok "All local files verified in B2"
+    else
+        log_fail "$MISMATCH files failed integrity check"
+    fi
+else
+    log_fail "Local MinIO directory not found: $MINIO_SOURCE"
+fi
+echo ""
+
+# 5. Test extraction (dry run)
+echo "5. Testing full archive extraction (dry run)..."
+echo "----------------------------------------"
+
+if [ -n "$LATEST_LOCAL" ]; then
+    EXPECTED_FILES=$(tar -tzf "$BACKUP_DIR/$LATEST_LOCAL" 2>/dev/null | wc -l)
+    log_ok "Archive contains $EXPECTED_FILES files/directories"
+    
+    # List key expected files
+    if tar -tzf "$BACKUP_DIR/$LATEST_LOCAL" 2>/dev/null | grep -q "docker-compose"; then
+        log_ok "docker-compose config found in archive"
+    else
+        log_warn "docker-compose config not found in archive"
+    fi
+fi
+echo ""
+
+# 6. Check backup age
+echo "6. Checking backup freshness..."
+echo "----------------------------------------"
+
+if [ -f "$BACKUP_DIR/LATEST_BACKUP_TIMESTAMP.txt" ]; then
+    LAST_BACKUP=$(cat "$BACKUP_DIR/LATEST_BACKUP_TIMESTAMP.txt")
+    log_info "Last backup timestamp: $LAST_BACKUP"
+    
+    # Parse timestamp and check age
+    BACKUP_DATE=$(echo "$LAST_BACKUP" | cut -d'_' -f1)
+    TODAY=$(date +%Y-%m-%d)
+    YESTERDAY=$(date -d "yesterday" +%Y-%m-%d 2>/dev/null || date -v-1d +%Y-%m-%d 2>/dev/null)
+    
+    if [ "$BACKUP_DATE" = "$TODAY" ]; then
+        log_ok "Backup is from today"
+    elif [ "$BACKUP_DATE" = "$YESTERDAY" ]; then
+        log_ok "Backup is from yesterday"
+    else
+        log_warn "Backup is older than 1 day: $BACKUP_DATE"
+    fi
+else
+    log_warn "No backup timestamp file found"
+fi
+echo ""
+
+# 7. B2 versioning check
+echo "7. Checking B2 bucket versioning (for recovery)..."
+echo "----------------------------------------"
+
+VERSIONING=$(rclone backend versioning "$B2_MINIO_BUCKET" 2>&1)
+if echo "$VERSIONING" | grep -qi "enabled\|Enabled"; then
+    log_ok "Versioning is enabled on MinIO bucket"
+else
+    log_warn "Versioning may not be enabled - point-in-time recovery unavailable"
+fi
+echo ""
+
+# Summary
+echo "========================================"
+echo "  Validation Summary"
+echo "========================================"
+
+if [ $ERRORS -eq 0 ] && [ $WARNINGS -eq 0 ]; then
+    echo -e "${GREEN}All checks passed!${NC}"
+    echo "Your Ente backup is healthy and complete."
+    exit 0
+elif [ $ERRORS -eq 0 ]; then
+    echo -e "${YELLOW}Passed with $WARNINGS warning(s)${NC}"
+    echo "Backup is functional but review warnings above."
+    exit 0
+else
+    echo -e "${RED}Failed with $ERRORS error(s) and $WARNINGS warning(s)${NC}"
+    echo "Backup integrity issues detected - investigate immediately!"
+    exit 1
+fi

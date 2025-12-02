@@ -1,0 +1,49 @@
+# Ente Museum Configuration
+# See: https://github.com/ente-io/ente/blob/main/server/configurations/local.yaml
+
+# Database connection
+db:
+    host: postgres
+    port: 5432
+    name: ente_db
+    user: pguser
+    password: pgpass
+    sslmode: disable
+
+# S3/MinIO storage configuration
+s3:
+    b2-eu-cen:
+        key: admin
+        secret: ${MINIO_ROOT_PASSWORD}
+        endpoint: ${ENTE_S3_ENDPOINT:-http://localhost:3200}
+        region: eu-central-2
+        bucket: b2-eu-cen
+    are_local_buckets: true
+    use_path_style_urls: true
+
+# Encryption keys - GENERATE NEW ONES FOR PRODUCTION
+# Use: go run tools/gen-random-keys/main.go
+key:
+    encryption: ${ENTE_KEY_ENCRYPTION}
+    hash: ${ENTE_KEY_HASH}
+
+# JWT secret - GENERATE NEW ONE FOR PRODUCTION
+jwt:
+    secret: ${ENTE_JWT_SECRET}
+
+# Optional: SMTP for sending OTP emails
+# smtp:
+#     host: smtp.example.com
+#     port: 587
+#     username: 
+#     password: 
+#     email: noreply@example.com
+
+# Internal settings
+internal:
+    silent: false
+    # Add your user ID here after first registration to become admin
+    # admins: ["your-user-id"]
+    disable-registration: false
+
+

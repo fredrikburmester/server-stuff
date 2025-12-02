@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euo pipefail
+
+SRC="${SRC_OVERRIDE:-/mnt/user/Immich/library}"   # change if needed
+REMOTE="immich-crypt"
+DEST="immich"
+LOG_DIR="/mnt/user/Backups/_logs"
+LOCK="/var/lock/immich_backup.lock"
+TRANSFERS=16
+CHECKERS=16
+DRY_RUN="${DRY_RUN:-0}"
+
+mkdir -p "$LOG_DIR"
+TS="$(date +'%Y-%m-%d_%H-%M-%S')"
+DELETED_DIR="${DEST}-deleted/${TS}"
+LOG_FILE="${LOG_DIR}/immich-b2-${TS}.log"
+
+exec 9>"$LOCK"
+flock -n 9 || { echo "Backup already running."; exit 0; }
+[[ -d "$SRC" ]] || { echo "Missing SRC: $SRC"; exit 1; }
+
+ARGS=(
+  --fast-list
+  --b2-hard-delete
+  --backup-dir "${REMOTE}:${DELETED_DIR}"
+  --metadata --links
+  --transfers "$TRANSFERS" --checkers "$CHECKERS"
+  --stats 30s
+  --log-file "$LOG_FILE" --log-level INFO
+)
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  rclone sync "$SRC" "${REMOTE}:${DEST}" --dry-run "${ARGS[@]}"
+else
+  rclone sync "$SRC" "${REMOTE}:${DEST}"          "${ARGS[@]}"
+fi
+
+echo "Done. Log: $LOG_FILE"

@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# Wait for Docker daemon to be ready
+while ! docker info >/dev/null 2>&1; do
+  sleep 2
+done
+
+cd /mnt/user/appdata/ente-photos || exit 1
+
+# Optional: small delay to be extra safe after array start
+sleep 10
+
+docker compose up -d

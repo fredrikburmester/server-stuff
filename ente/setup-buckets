@@ -1,0 +1,69 @@
+#!/bin/bash
+
+# Setup B2 buckets for Ente incremental backups
+# Run this ONCE before your first backup
+
+echo "========================================"
+echo "  B2 Bucket Setup for Ente Backups"
+echo "========================================"
+echo ""
+
+# 1. Create the ente-minio bucket
+echo "1. Creating 'ente-minio' bucket..."
+echo "----------------------------------------"
+rclone mkdir ente-backups:ente-minio
+if [ $? -eq 0 ]; then
+    echo "[OK] Bucket created"
+else
+    echo "[WARN] Bucket may already exist"
+fi
+echo ""
+
+# 2. Enable versioning on ente-minio
+echo "2. Enabling versioning on 'ente-minio'..."
+echo "----------------------------------------"
+rclone backend versioning ente-backups:ente-minio -o mode=on
+if [ $? -eq 0 ]; then
+    echo "[OK] Versioning enabled"
+    echo "     This protects against accidental deletions"
+else
+    echo "[FAIL] Could not enable versioning"
+    echo "       Enable manually in B2 web console"
+fi
+echo ""
+
+# 3. Enable versioning on tar backup bucket
+echo "3. Enabling versioning on 'ente-photos-tar-backup'..."
+echo "----------------------------------------"
+rclone backend versioning ente-backups:ente-photos-tar-backup -o mode=on
+if [ $? -eq 0 ]; then
+    echo "[OK] Versioning enabled"
+else
+    echo "[WARN] May already be enabled"
+fi
+echo ""
+
+# 4. Verify setup
+echo "4. Verifying configuration..."
+echo "----------------------------------------"
+echo ""
+echo "Buckets:"
+rclone lsd ente-backups: --max-depth 1
+echo ""
+
+echo "Versioning status (ente-minio):"
+VERSIONING=$(rclone backend versioning ente-backups:ente-minio 2>&1)
+if echo "$VERSIONING" | grep -qi "enabled"; then
+    echo "[OK] Versioning is ENABLED"
+else
+    echo "[WARN] Versioning status: $VERSIONING"
+fi
+echo ""
+
+echo "========================================"
+echo "  Setup Complete"
+echo "========================================"
+echo ""
+echo "Next steps:"
+echo "  1. ./backup-ente        - Create your first backup"
+echo "  2. ./validate-backup    - Verify backup integrity"

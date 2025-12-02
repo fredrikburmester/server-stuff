@@ -1,0 +1,220 @@
+#!/bin/bash
+
+# Ente Full Restore Script
+# Restores from: config tar (local or B2) + MinIO data (B2)
+
+set -e
+
+BACKUP_DIR="/mnt/user/Backups/EntePhotos"
+APPDATA_DIR="/mnt/user/appdata/ente-photos"
+MINIO_DIR="/mnt/user/EntePhotos/minio-data"
+B2_TAR_BUCKET="ente-backups:ente-photos-tar-backup"
+B2_MINIO_BUCKET="ente-backups:ente-minio"
+
+# Parse arguments
+RESTORE_SOURCE="local"  # default: use local tar if available
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --from-b2) RESTORE_SOURCE="b2"; shift ;;
+        --tar=*) SPECIFIC_TAR="${1#*=}"; shift ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+echo "========================================"
+echo "  Ente Full Restore"
+echo "  $(date)"
+echo "========================================"
+echo ""
+
+# Ensure required directories exist
+mkdir -p "$APPDATA_DIR" "$MINIO_DIR"
+
+if [ ! -d "$(dirname "$APPDATA_DIR")" ]; then
+    echo "[FAIL] Parent directory for $APPDATA_DIR does not exist!"
+    echo "       Please create the Unraid share first."
+    exit 1
+fi
+
+if [ ! -d "$(dirname "$MINIO_DIR")" ]; then
+    echo "[FAIL] Parent directory for $MINIO_DIR does not exist!"
+    echo "       Please create the Unraid share first."
+    exit 1
+fi
+
+# 1. Find and prepare the config tar
+echo "1. Locating config backup..."
+echo "----------------------------------------"
+
+if [ -n "$SPECIFIC_TAR" ]; then
+    # User specified a specific tar file
+    if [ -f "$SPECIFIC_TAR" ]; then
+        LATEST_BACKUP="$SPECIFIC_TAR"
+        echo "[OK] Using specified tar: $LATEST_BACKUP"
+    elif [ -f "$BACKUP_DIR/$SPECIFIC_TAR" ]; then
+        LATEST_BACKUP="$BACKUP_DIR/$SPECIFIC_TAR"
+        echo "[OK] Using specified tar: $LATEST_BACKUP"
+    else
+        echo "[FAIL] Specified tar not found: $SPECIFIC_TAR"
+        exit 1
+    fi
+elif [ "$RESTORE_SOURCE" = "b2" ]; then
+    # Download latest from B2
+    echo "[INFO] Fetching latest backup from B2..."
+    REMOTE_TAR=$(rclone lsf "$B2_TAR_BUCKET" --files-only 2>/dev/null | grep "ente-backup-.*\.tar\.gz" | sort -r | head -n 1)
+    
+    if [ -z "$REMOTE_TAR" ]; then
+        echo "[FAIL] No backup found in B2 bucket"
+        exit 1
+    fi
+    
+    echo "[INFO] Downloading $REMOTE_TAR from B2..."
+    rclone copy "$B2_TAR_BUCKET/$REMOTE_TAR" "$BACKUP_DIR/" --progress
+    LATEST_BACKUP="$BACKUP_DIR/$REMOTE_TAR"
+    echo "[OK] Downloaded: $LATEST_BACKUP"
+else
+    # Use local tar
+    LATEST_BACKUP=$(ls -t "$BACKUP_DIR" 2>/dev/null | grep "ente-backup-.*\.tar\.gz" | head -n 1)
+    
+    if [ -z "$LATEST_BACKUP" ]; then
+        echo "[WARN] No local backup found, attempting B2 download..."
+        REMOTE_TAR=$(rclone lsf "$B2_TAR_BUCKET" --files-only 2>/dev/null | grep "ente-backup-.*\.tar\.gz" | sort -r | head -n 1)
+        
+        if [ -z "$REMOTE_TAR" ]; then
+            echo "[FAIL] No backup found locally or in B2"
+            exit 1
+        fi
+        
+        rclone copy "$B2_TAR_BUCKET/$REMOTE_TAR" "$BACKUP_DIR/" --progress
+        LATEST_BACKUP="$BACKUP_DIR/$REMOTE_TAR"
+    else
+        LATEST_BACKUP="$BACKUP_DIR/$LATEST_BACKUP"
+    fi
+    echo "[OK] Using: $LATEST_BACKUP"
+fi
+echo ""
+
+# 2. Extract the config backup
+echo "2. Extracting config backup..."
+echo "----------------------------------------"
+
+tar -xzvf "$LATEST_BACKUP" -C "$BACKUP_DIR"
+
+EXTRACTED_FOLDER=$(tar -tzf "$LATEST_BACKUP" | head -1 | cut -d'/' -f1)
+
+if [ ! -d "$BACKUP_DIR/$EXTRACTED_FOLDER" ]; then
+    echo "[FAIL] Extraction failed or backup is corrupted"
+    exit 1
+fi
+
+echo "[OK] Extracted to: $BACKUP_DIR/$EXTRACTED_FOLDER"
+
+# Determine appdata location (may be nested or flat)
+if [ -d "$BACKUP_DIR/$EXTRACTED_FOLDER/appdata" ]; then
+    EXTRACTED_APPDATA="$BACKUP_DIR/$EXTRACTED_FOLDER/appdata"
+elif [ -f "$BACKUP_DIR/$EXTRACTED_FOLDER/postgres-backup.sql" ]; then
+    EXTRACTED_APPDATA="$BACKUP_DIR/$EXTRACTED_FOLDER"
+else
+    echo "[FAIL] Could not locate appdata in extracted backup"
+    exit 1
+fi
+
+if [ ! -f "$EXTRACTED_APPDATA/postgres-backup.sql" ]; then
+    echo "[FAIL] postgres-backup.sql missing in extracted backup!"
+    exit 1
+fi
+echo "[OK] Config files validated"
+echo ""
+
+# 3. Restore AppData
+echo "3. Restoring AppData (configs + DB dump)..."
+echo "----------------------------------------"
+
+rsync -av "$EXTRACTED_APPDATA/" "$APPDATA_DIR/"
+echo "[OK] AppData restored"
+echo ""
+
+# 4. Restore MinIO data from B2
+echo "4. Restoring MinIO object storage from B2..."
+echo "----------------------------------------"
+echo "[INFO] This may take a while for large photo libraries..."
+
+rclone sync "$B2_MINIO_BUCKET" "$MINIO_DIR/" \
+    --progress \
+    --transfers=8 \
+    --checkers=16
+
+echo "[OK] MinIO data restored"
+echo ""
+
+# 5. Start Docker containers
+echo "5. Starting Ente Docker stack..."
+echo "----------------------------------------"
+
+cd "$APPDATA_DIR"
+docker compose up -d
+echo "[OK] Containers starting"
+echo ""
+
+# 6. Wait for PostgreSQL
+echo "6. Waiting for PostgreSQL to be ready..."
+echo "----------------------------------------"
+
+TRIES=0
+# Detect postgres container name (new explicit name or auto-generated)
+PG_CONTAINER=""
+for name in ente-postgres ente-photos-postgres-1; do
+    if docker ps --format '{{.Names}}' | grep -q "^${name}$"; then
+        PG_CONTAINER="$name"
+        break
+    fi
+done
+
+while ! docker exec "${PG_CONTAINER:-ente-postgres}" pg_isready -U pguser 2>/dev/null; do
+    TRIES=$((TRIES+1))
+    if [ $TRIES -gt 30 ]; then
+        echo "[FAIL] PostgreSQL did not start in time"
+        exit 1
+    fi
+    echo "[INFO] Waiting... ($TRIES/30)"
+    sleep 2
+done
+echo "[OK] PostgreSQL is ready"
+echo ""
+
+# 7. Restore PostgreSQL database
+echo "7. Restoring PostgreSQL database..."
+echo "----------------------------------------"
+
+echo "[INFO] Dropping existing database..."
+docker exec -i "${PG_CONTAINER:-ente-postgres}" psql -U pguser -d postgres <<EOF
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='ente_db';
+DROP DATABASE IF EXISTS ente_db;
+CREATE DATABASE ente_db;
+EOF
+
+echo "[INFO] Restoring from dump..."
+docker exec -i "${PG_CONTAINER:-ente-postgres}" psql -U pguser -d ente_db < "$APPDATA_DIR/postgres-backup.sql"
+echo "[OK] Database restored"
+echo ""
+
+# 8. Clean up
+echo "8. Cleaning up..."
+echo "----------------------------------------"
+
+rm -rf "$BACKUP_DIR/$EXTRACTED_FOLDER"
+echo "[OK] Temporary files removed"
+echo ""
+
+echo "========================================"
+echo "  Restore Complete!"
+echo "========================================"
+echo ""
+echo "Next steps:"
+echo "  1. Verify Ente is running: docker ps | grep ente"
+echo "  2. Check logs: docker compose -f $APPDATA_DIR/docker-compose.yml logs -f"
+echo "  3. Test your Ente client connection"
+echo ""
+echo "Options used:"
+echo "  --from-b2     Force download config tar from B2"
+echo "  --tar=FILE    Use a specific tar file"
