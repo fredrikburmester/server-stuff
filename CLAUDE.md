@@ -2,6 +2,13 @@
 
 Homelab server configs and operational tooling.
 
+## Current migration: Real-Debrid → local storage
+
+Moving off **Real-Debrid** to **local storage**. Treat the `real-debrid/`
+configs and runbooks as legacy/being-phased-out — don't extend them. New media
+flows to local disk (`/movies`, `/tv`). Radarr/Sonarr download-client and
+import paths are being repointed accordingly.
+
 ## Radarr / Sonarr management — use `arr-tools/`
 
 When the user asks to **add movies or TV shows** to Radarr/Sonarr, **bulk-import a
