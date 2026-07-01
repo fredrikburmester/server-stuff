@@ -10,9 +10,9 @@ def api(path,method="GET",body=None):
     with urllib.request.urlopen(req,timeout=30) as r:
         t=r.read().decode(); return json.loads(t) if t else None
 
-# Lean toward smaller movie files, generous (not hard) ceiling. MB/min, scales w/ runtime.
-PREF=50.0   # ~5.8 GB @115m  (what Radarr aims for -> biases to lean encodes)
-MAXV=100.0  # ~11.5 GB @115m (generous ceiling, replaces Bluray-1080p's 'unlimited')
+# Cap movie size ~8GB for a typical 2h film. MB/min, scales w/ runtime.
+PREF=45.0   # ~5.2 GB @115m  (target -> biases to lean encodes)
+MAXV=70.0   # ~8.0 GB @115m  (hard cap -> rejects oversized grabs)
 
 defs=api("/api/v3/qualitydefinition")
 changed=[]
