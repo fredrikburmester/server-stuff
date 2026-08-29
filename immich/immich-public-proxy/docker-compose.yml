@@ -1,0 +1,17 @@
+name: immich-public-proxy
+
+# Deployed on Unraid (Mercury) at
+# /boot/config/plugins/compose.manager/projects/immich-public-proxy/
+# Serves public Immich share links read-only, without exposing the Immich API.
+# Public URL: https://photos.fdrive.se (proxy host in Nginx Proxy Manager -> 192.168.1.105:2284)
+
+services:
+  immich-public-proxy:
+    container_name: immich_public_proxy
+    image: alangrainger/immich-public-proxy:latest
+    restart: unless-stopped
+    ports:
+      - 2284:3000
+    environment:
+      - IMMICH_URL=http://192.168.1.105:2283
+      - PUBLIC_BASE_URL=https://photos.fdrive.se
