@@ -88,6 +88,7 @@ for gname, lst in GROUPS:
             payload["qualityProfileId"] = PROFILE
             payload["rootFolderPath"] = ROOT
             payload["monitored"] = True
+            payload["minimumAvailability"] = "released"
             payload["addOptions"] = {"searchForMovie": True}
             api("/api/v3/movie", method="POST", body=payload)
             existing.add(tmdb)

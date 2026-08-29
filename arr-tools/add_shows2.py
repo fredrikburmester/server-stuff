@@ -8,16 +8,7 @@ def api(path, method="GET", body=None):
     req=urllib.request.Request(URL+path,data=data,headers=HDRS,method=method)
     with urllib.request.urlopen(req,timeout=30) as r: return json.loads(r.read().decode())
 SHOWS=[
- ("Off Campus",2025),("The Office",2005),("The Wire",2002),("The Boys",2019),
- ("Game Changer",2019),("Tom Clancy's Jack Ryan",2018),("Stranger Things",2016),
- ("The Night Manager",2016),("The Bear",2022),("Marvel's The Punisher",2017),
- ("Black Mirror",2011),("The Big Bang Theory",2007),("South Park",1997),
- ("Attack on Titan",2013),("House of the Dragon",2022),("Severance",2022),
- ("Squid Game",2021),("Adventure Time",2010),("Hijack",2023),
- ("The Summer I Turned Pretty",2022),("Euphoria",2019),
- ("Formula 1: Drive to Survive",2019),("Criminal Minds",2005),("Foundation",2021),
- ("Silicon Valley",2014),("Billions",2016),("Suits",2011),
- ("Star Trek: Strange New Worlds",2022),
+ ("One Punch Man",2015),
 ]
 existing={s["tvdbId"] for s in api("/api/v3/series")}
 added,skipped,failed=[],[],[]
@@ -31,8 +22,8 @@ for title,year in SHOWS:
         if not tvdb: failed.append((title,year,"no tvdbId")); continue
         if tvdb in existing: skipped.append((chosen,"already in library")); continue
         p=dict(best); p["qualityProfileId"]=PROFILE; p["rootFolderPath"]=ROOT
-        p["monitored"]=True; p["seasonFolder"]=True
-        p["addOptions"]={"monitor":"all","searchForMissingEpisodes":True}
+        p["monitored"]=True; p["seasonFolder"]=True; p["seriesType"]="anime"
+        p["addOptions"]={"monitor":"firstSeason","searchForMissingEpisodes":True}
         api("/api/v3/series",method="POST",body=p); existing.add(tvdb)
         flag="" if best.get("year")==year else f"  [year {best.get('year')} vs req {year}]"
         added.append((chosen,flag))

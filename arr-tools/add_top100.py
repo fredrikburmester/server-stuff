@@ -54,7 +54,7 @@ for title,year in MOVIES:
         tmdb=best["tmdbId"]; chosen=f'{best["title"]} ({best.get("year")})'
         if tmdb in existing: skipped.append((chosen,"already in library")); continue
         p=dict(best); p["qualityProfileId"]=PROFILE; p["rootFolderPath"]=ROOT
-        p["monitored"]=True; p["addOptions"]={"searchForMovie":True}
+        p["monitored"]=True; p["minimumAvailability"]="released"; p["addOptions"]={"searchForMovie":True}
         api("/api/v3/movie",method="POST",body=p); existing.add(tmdb)
         flag="" if best.get("year")==year else f"  [year {best.get('year')} vs req {year}]"
         added.append((chosen,flag))

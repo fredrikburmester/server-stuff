@@ -91,6 +91,7 @@ for title, year in MOVIES:
         payload["qualityProfileId"] = PROFILE
         payload["rootFolderPath"] = ROOT
         payload["monitored"] = True
+        payload["minimumAvailability"] = "released"
         payload["addOptions"] = {"searchForMovie": True}
         res = api("/api/v3/movie", method="POST", body=payload)
         existing.add(tmdb)

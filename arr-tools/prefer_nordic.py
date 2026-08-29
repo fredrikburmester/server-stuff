@@ -24,7 +24,10 @@ SCORE = 50          # positive => preferred, not required
 
 # Scene naming that the language flag frequently misses. Word-boundaried so we
 # don't match e.g. "Sweden" in a title. SVE/SweSub cover Swedish subs/dubs.
-TITLE_REGEX = r"\b(NORDiC|SWE(DiSH|SUB)?|SweSub|SVE|MULTi)\b"
+# NOTE: deliberately NOT matching "MULTi" — it just means multiple audio tracks
+# (usually French/Spanish/Italian) and gave +50 to junk foreign torrents, which
+# outranked the usenet-first delay profile (CF score beats protocol preference).
+TITLE_REGEX = r"\b(NORDiC|SWE(DiSH|SUB)?|SweSub|SVE)\b"
 
 
 def swedish_language_id(base, key):
