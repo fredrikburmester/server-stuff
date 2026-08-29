@@ -1,11 +1,15 @@
 #!/bin/bash
+# Keep the USB Bluetooth adapter (hci0) powered up for Homebridge / homebridge-plejd.
+#
+# noble (the BLE stack homebridge-plejd uses) needs hci0 UP but never brings it
+# up itself, and nothing else on Unraid does (no bluetoothd). Scheduled via
+# User Scripts every 5 min: covers array start AND recovery after the dongle
+# resets. Idempotent - does nothing when hci0 is already up.
+#
+# Do NOT start bluetoothd here: it competes with noble for the adapter.
 
-# Bring adapter up if it exists
 if hciconfig hci0 >/dev/null 2>&1; then
-  hciconfig hci0 up
-fi
-
-# Start bluetoothd only if not already running
-if ! pgrep -x bluetoothd >/dev/null 2>&1; then
-  bluetoothd &
+  if ! hciconfig hci0 | grep -q "UP RUNNING"; then
+    hciconfig hci0 up && logger -t bluetooth-boot "hci0 was down - brought up"
+  fi
 fi
