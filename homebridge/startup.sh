@@ -27,3 +27,12 @@ if [ -d "$HCI" ] && ! "$NODE" -e "process.dlopen(module, process.argv[1])" "$HCI
     && echo "[startup.sh] bluetooth-hci-socket rebuilt OK" \
     || echo "[startup.sh] bluetooth-hci-socket rebuild FAILED - see /tmp/bhs-build.log in the container"
 fi
+
+# --- homebridge-plejd: local patches (hide scenes; make devices[].hidden stick) ---
+# See /homebridge/patch-plejd.js. Idempotent; must re-run on every start because
+# plugin updates overwrite dist/. If it fails the plugin still works, the hidden
+# scenes/devices just reappear in HomeKit.
+if [ -f /homebridge/patch-plejd.js ] && [ -d "$PLEJD" ]; then
+  "$NODE" /homebridge/patch-plejd.js \
+    || echo "[startup.sh] patch-plejd.js FAILED - plugin code changed? hidden scenes/devices will reappear"
+fi

@@ -30,6 +30,17 @@ profile (id 6), root folders (`/movies`, `/tv`), and search-on-add.
 
 See [`arr-tools/README.md`](arr-tools/README.md) for the full script reference.
 
+## Homebridge / Plejd / Tuya — see `homebridge/README.md`
+
+When the user asks about **Homebridge, Plejd lights, Tuya devices, HomeKit
+accessories showing/not showing, or Bluetooth on Unraid**, read
+[`homebridge/README.md`](homebridge/README.md) first. It has the full picture:
+why Plejd breaks (Node ABI bump, `hci0` down), the local plugin patch
+(`patch-plejd.js`) that makes hiding work, the current keep/hide list with
+Plejd identifiers, and a runbook for un-hiding a device (delete its entry from
+`devices[]`, restart) or hiding another one. Container runs on the Unraid box;
+the host files live in `/mnt/user/appdata/homebridge/`.
+
 ## Conventions
 - Secrets never get committed: `.env`, `*.conf`, `**/secrets/`, `**/credentials/`
   are gitignored. Use `*.example` / `*.template` files for shareable templates.
